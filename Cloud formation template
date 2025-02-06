@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'Detect AWS Root User sign-in events and send SNS email notification'
+
+Resources:
+
+  # 🔹 Create an SNS Topic
+  RootUserSignInSNSTopic:
+    Type: AWS::SNS::Topic
+    Properties:
+      TopicName: RootUserSignInAlert
+
+  # 🔹 SNS Email Subscription (Replace with your email)
+  RootUserSNSEmailSubscription:
+    Type: AWS::SNS::Subscription
+    Properties:
+      TopicArn: !Ref RootUserSignInSNSTopic
+      Protocol: email
+      Endpoint: "your-email@example.com"  # Change this!
+
+  # 🔹 IAM Role for Lambda
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: RootUserSignInLambdaRole
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: 
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaSNSPublishPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action: 
+                  - sns:Publish
+                Resource: !Ref RootUserSignInSNSTopic
+              - Effect: Allow
+                Action: 
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  # 🔹 Lambda Function
+  RootUserSignInLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: RootUserSignInLambda
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Handler: index.lambda_handler
+      Timeout: 10
+      Environment:
+        Variables:
+          SNS_TOPIC_ARN: !Ref RootUserSignInSNSTopic
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          sns_client = boto3.client("sns")
+          SNS_TOPIC_ARN = os.environ["SNS_TOPIC_ARN"]
+
+          def lambda_handler(event, context):
+              print("Received event:", json.dumps(event, indent=2))
+
+              # Extract event details
+              user = event["detail"]["userIdentity"]["type"]
+              time = event["detail"]["eventTime"]
+              source_ip = event["detail"]["sourceIPAddress"]
+
+              # Email message
+              message = f"""
+              🚨 Alert: AWS Root User Sign-In Detected!
+
+              User: {user}
+              Sign-In Time: {time}
+              IP Address: {source_ip}
+
+              Check AWS Security immediately!
+              """
+
+              # Send SNS notification
+              response = sns_client.publish(
+                  TopicArn=SNS_TOPIC_ARN,
+                  Subject="🚨 AWS Root User Sign-In Alert!",
+                  Message=message
+              )
+
+              print("SNS Response:", response)
+              return {"statusCode": 200, "body": json.dumps("Notification Sent!")}
+
+  # 🔹 EventBridge Rule
+  RootUserSignInEventRule:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: RootUserSignInRule
+      Description: "Triggers when IAM Root User signs in"
+      EventPattern:
+        source:
+          - aws.signin
+        detail-type:
+          - "AWS Console Sign In via CloudTrail"
+        detail:
+          userIdentity:
+            type:
+              - "Root"
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt RootUserSignInLambda.Arn
+          Id: "RootUserSignInLambdaTarget"
+
+  # 🔹 Permission for EventBridge to Invoke Lambda
+  RootUserSignInLambdaPermission:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref RootUserSignInLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt RootUserSignInEventRule.Arn
+
+Outputs:
+  SNSTopicArn:
+    Description: "SNS Topic ARN for Root User Sign-In Alerts"
+    Value: !Ref RootUserSignInSNSTopic
